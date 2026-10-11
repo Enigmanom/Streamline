@@ -1,6 +1,6 @@
 # FSR Gamma 2.2 compute-queue regression
 
-Run from a Visual Studio developer shell on a GPU supported by the FSR 4 ML provider:
+Run from a Visual Studio developer shell on a GPU supported with FSR 4:
 
 ```powershell
 .\tests\run-fsr-gamma-queue-regression.ps1 -SdkDirectory <runtime-directory>
