@@ -130,6 +130,10 @@ int wmain(int argc, wchar_t **argv)
         auto upgrade = resolve<PFun_slUpgradeInterface>(module, "slUpgradeInterface");
         auto setDevice = resolve<PFun_slSetD3DDevice>(module, "slSetD3DDevice");
         auto getFunction = resolve<PFun_slGetFeatureFunction>(module, "slGetFeatureFunction");
+        auto getToken = resolve<PFun_slGetNewFrameToken>(module, "slGetNewFrameToken");
+        auto setConstants = resolve<PFun_slSetConstants>(module, "slSetConstants");
+        auto setTags = resolve<PFun_slSetTagForFrame>(module, "slSetTagForFrame");
+        auto evaluate = resolve<PFun_slEvaluateFeature>(module, "slEvaluateFeature");
         const wchar_t *paths[]{sdk.c_str()};
         sl::Feature features[]{sl::kFeatureFSR_G};
         sl::Preferences preferences{};
@@ -163,6 +167,7 @@ int wmain(int argc, wchar_t **argv)
         check(getFunction(sl::kFeatureFSR_G, "slFSRGQuiesce", quiesceFunction),
               "GetQuiesceFunction");
         auto setOptions = reinterpret_cast<PFun_slFSRGSetOptions *>(optionsFunction);
+        auto getState = reinterpret_cast<PFun_slFSRGGetState *>(stateFunction);
         auto quiesce = reinterpret_cast<PFun_slFSRGQuiesce *>(quiesceFunction);
         const sl::ViewportHandle viewport(0);
         sl::FSRGAlgorithmOptions algorithmOptions{};
@@ -217,8 +222,126 @@ int wmain(int argc, wchar_t **argv)
         check(list->Close(), "InitialClose");
         ComPtr<ID3D12Fence> fence;
         check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)), "CreateFence");
+        auto depth = texture(device.Get(), renderWidth, renderHeight, DXGI_FORMAT_R32_FLOAT);
+        auto motion = texture(device.Get(), renderWidth, renderHeight, DXGI_FORMAT_R16G16_FLOAT);
+        auto hudless =
+            texture(device.Get(), displayWidth, displayHeight, DXGI_FORMAT_R8G8B8A8_UNORM);
+        std::array<ID3D12Resource *, 3> resources{depth.Get(), motion.Get(), hudless.Get()};
+        ComPtr<ID3D12DescriptorHeap> rtvHeap;
+        D3D12_DESCRIPTOR_HEAP_DESC heapDesc{};
+        heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+        heapDesc.NumDescriptors = 3;
+        check(device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&rtvHeap)), "CreateRTVHeap");
+        const UINT step = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 3> handles{};
+        for (UINT i = 0; i < resources.size(); ++i)
+        {
+            handles[i] = rtvHeap->GetCPUDescriptorHandleForHeapStart();
+            handles[i].ptr += i * step;
+            device->CreateRenderTargetView(resources[i], nullptr, handles[i]);
+        }
+        const sl::float4x4 identity{{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}, {0, 0, 0, 1}}};
+        sl::Constants constants{};
+        constants.cameraViewToClip = identity;
+        constants.clipToCameraView = identity;
+        constants.clipToLensClip = identity;
+        constants.clipToPrevClip = identity;
+        constants.prevClipToClip = identity;
+        constants.jitterOffset = {0, 0};
+        constants.mvecScale = {1.0f / renderWidth, 1.0f / renderHeight};
+        constants.cameraPinholeOffset = {0, 0};
+        constants.cameraPos = {0, 0, 0};
+        constants.cameraUp = {0, 1, 0};
+        constants.cameraRight = {1, 0, 0};
+        constants.cameraFwd = {0, 0, 1};
+        constants.cameraNear = 0.1f;
+        constants.cameraFar = 1000;
+        constants.cameraFOV = 1;
+        constants.cameraAspectRatio = float(displayWidth) / displayHeight;
+        constants.depthInverted = sl::Boolean::eFalse;
+        constants.cameraMotionIncluded = sl::Boolean::eTrue;
+        constants.motionVectors3D = sl::Boolean::eFalse;
+        const sl::Extent renderExtent{0, 0, renderWidth, renderHeight},
+            outputExtent{0, 0, displayWidth, displayHeight};
+        sl::Resource depthTag(sl::ResourceType::eTex2d, depth.Get(), nullptr, nullptr,
+                              D3D12_RESOURCE_STATE_COMMON);
+        sl::Resource motionTag(sl::ResourceType::eTex2d, motion.Get(), nullptr, nullptr,
+                               D3D12_RESOURCE_STATE_COMMON);
+        sl::Resource hudlessTag(sl::ResourceType::eTex2d, hudless.Get(), nullptr, nullptr,
+                                D3D12_RESOURCE_STATE_COMMON);
+        const sl::ResourceTag tags[]{{&depthTag, sl::kBufferTypeDepth,
+                                      sl::ResourceLifecycle::eValidUntilPresent, &renderExtent},
+                                     {&motionTag, sl::kBufferTypeMotionVectors,
+                                      sl::ResourceLifecycle::eValidUntilPresent, &renderExtent},
+                                     {&hudlessTag, sl::kBufferTypeHUDLessColor,
+                                      sl::ResourceLifecycle::eValidUntilPresent, &outputExtent}};
+        UINT64 submitted = 0;
+        options.mode = sl::FSRGMode::eOn;
+        check(setOptions(viewport, options), "SetOptionsOn");
+        for (UINT iteration = 0; iteration < iterations; ++iteration)
+        {
+            waitFor(rawDevice.Get(), fence.Get(), submitted);
+            check(allocator->Reset(), "ResetAllocator");
+            check(list->Reset(allocator.Get(), nullptr), "ResetList");
+            const float clear[3][4]{
+                {0.5f, 0, 0, 0}, {0, 0, 0, 0}, {0.15f + (iteration % 20) * 0.01f, 0.25f, 0.35f, 1}};
+            for (UINT i = 0; i < resources.size(); ++i)
+            {
+                transition(list.Get(), resources[i], D3D12_RESOURCE_STATE_COMMON,
+                           D3D12_RESOURCE_STATE_RENDER_TARGET);
+                list->ClearRenderTargetView(handles[i], clear[i], 0, nullptr);
+                transition(list.Get(), resources[i], D3D12_RESOURCE_STATE_RENDER_TARGET,
+                           D3D12_RESOURCE_STATE_COMMON);
+            }
+            ComPtr<ID3D12Resource> backbuffer;
+            check(swap->GetBuffer(swap->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&backbuffer)),
+                  "GetBackbuffer");
+            transition(list.Get(), hudless.Get(), D3D12_RESOURCE_STATE_COMMON,
+                       D3D12_RESOURCE_STATE_COPY_SOURCE);
+            transition(list.Get(), backbuffer.Get(), D3D12_RESOURCE_STATE_PRESENT,
+                       D3D12_RESOURCE_STATE_COPY_DEST);
+            list->CopyResource(backbuffer.Get(), hudless.Get());
+            transition(list.Get(), hudless.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
+                       D3D12_RESOURCE_STATE_COMMON);
+            transition(list.Get(), backbuffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                       D3D12_RESOURCE_STATE_PRESENT);
+            const UINT frame = firstFrame + iteration;
+            sl::FrameToken *token{};
+            check(getToken(token, &frame), "FrameToken");
+            constants.reset = iteration == 0 ? sl::Boolean::eTrue : sl::Boolean::eFalse;
+            check(setConstants(constants, *token, viewport), "SetConstants");
+            check(setTags(*token, viewport, tags, 3,
+                          reinterpret_cast<sl::CommandBuffer *>(list.Get())),
+                  "SetTags");
+            const sl::BaseStructure *inputs[]{&viewport};
+            check(evaluate(sl::kFeatureFSR_G, *token, inputs, 1,
+                           reinterpret_cast<sl::CommandBuffer *>(list.Get())),
+                  "EvaluateFG");
+            check(list->Close(), "CloseList");
+            ID3D12CommandList *lists[]{list.Get()};
+            queue->ExecuteCommandLists(1, lists);
+            check(queue->Signal(fence.Get(), ++submitted), "Signal");
+            const HRESULT present = swap->Present(0, 0);
+            std::cout << "frame=" << frame << " Present=0x" << std::hex << unsigned(present)
+                      << std::dec << '\n';
+            check(present, "Present");
+            sl::FSRGState state{};
+            check(getState(viewport, state), "FGState");
+            ComPtr<ID3D12Fence> completion;
+            completion.Attach(static_cast<ID3D12Fence *>(state.completionFence));
+            std::cout << "active=" << unsigned(state.active)
+                      << " mode=" << unsigned(state.completionMode)
+                      << " completion=" << state.completionFenceValue << '\n';
+            if (!completion || !state.completionFenceValue)
+                throw std::runtime_error("No FG host completion dependency");
+            waitFor(rawDevice.Get(), completion.Get(), state.completionFenceValue);
+            check(rawDevice->GetDeviceRemovedReason(), "PostFG/device removed");
+        }
+        waitFor(rawDevice.Get(), fence.Get(), submitted);
         check(quiesce(), "Quiesce");
-        std::cout << "READY: Streamline and the D3D12 swapchain initialized\n";
+        std::cout << "PASS: " << iterations
+                  << " generated-frame submissions completed without device removal\n";
+        // Process exit releases the SDK resources so teardown doesn't hide the dispatch result.
         std::_Exit(0);
     }
     catch (const std::exception &error)
