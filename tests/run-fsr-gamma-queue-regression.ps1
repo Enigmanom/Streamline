@@ -22,7 +22,10 @@ $exe = Join-Path $OutputDirectory 'fsr-gamma-queue-regression.exe'
     "/Fo:$OutputDirectory\\" "/Fe:$exe"
 if ($LASTEXITCODE -ne 0) { throw 'Failed to compile the GPU regression.' }
 $cases = @(
-    @{Name='fsr4-gamma-loading'; Algorithm='fsr4'; Color='gamma'; Milliseconds='166.000015'; First='4726'}
+    @{Name='fsr4-gamma-loading'; Algorithm='fsr4'; Color='gamma'; Milliseconds='166.000015'; First='4726'},
+    @{Name='fsr4-gamma-normal'; Algorithm='fsr4'; Color='gamma'; Milliseconds='16.666'; First='1'},
+    @{Name='fsr3-gamma-control'; Algorithm='fsr3'; Color='gamma'; Milliseconds='166.000015'; First='4726'},
+    @{Name='fsr4-srgb-control'; Algorithm='fsr4'; Color='srgb'; Milliseconds='166.000015'; First='4726'}
 )
 Push-Location $OutputDirectory
 try {
