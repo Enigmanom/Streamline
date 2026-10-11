@@ -75,12 +75,13 @@ bool ColorConversionD3D12::ensureLinearTexture(
         return true;
     }
     release(texture);
+    // Frame Gen runs this on a compute queue, which can't use pixel-shader resource states.
     chi::ResourceDescription description(
         width,
         height,
         chi::eFormatRGBA16F,
         chi::HeapType::eHeapTypeDefault,
-        chi::ResourceState::eTextureRead,
+        chi::ResourceState::eStorageRead,
         chi::ResourceFlags::eShaderResourceStorage);
     if (!succeeded(m_compute->createTexture2D(
             description,
@@ -173,7 +174,7 @@ bool ColorConversionD3D12::dispatch(
 
     extra::ScopedTasks reverseTransitions;
     const chi::ResourceTransition transitions[]{
-        { source, chi::ResourceState::eTextureRead, sourceState },
+        { source, chi::ResourceState::eStorageRead, sourceState },
         { destination, chi::ResourceState::eStorageRW, destinationState }
     };
     if (!succeeded(m_compute->transitionResources(
